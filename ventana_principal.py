@@ -2,6 +2,7 @@ import cv2
 import math
 import os
 import tempfile
+import re
 from pathlib import Path
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QSplitter, QListWidget, 
@@ -20,7 +21,8 @@ class TareaDeteccion(QThread):
         super().__init__()
         self.ruta = ruta
     def run(self):
-        rects, img = DetectorFotos.detectar(self.ruta, margen_recorte=18)
+        # FIX AUTO-DETECTAR: Margen de recorte establecido en 0 absoluto
+        rects, img = DetectorFotos.detectar(self.ruta, margen_recorte=200)
         self.terminado.emit(rects, img)
 
 class TareaCargarImagen(QThread):
@@ -44,7 +46,6 @@ class TareaEscanear(QThread):
         self.overlay = overlay
         
     def run(self):
-        # Simulación de progreso de Hardware WIA
         for i in range(1, 101):
             if self.overlay.cancelado:
                 self.error.emit("Cancelado por el usuario.")
@@ -72,16 +73,7 @@ class TareaGuardar(QThread):
         contador = 1
         for box in self.datos_cajas:
             cx, cy, w, h, angle, rot_out = box['cx'], box['cy'], box['w'], box['h'], box['angle'], box['rot_out']
-            pad = int(math.hypot(w, h) / 2) + 20
-            padded_img = cv2.copyMakeBorder(self.img_cv, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=[0, 0, 0])
-            cx_pad, cy_pad = cx + pad, cy + pad
-            M = cv2.getRotationMatrix2D((cx_pad, cy_pad), angle, 1.0)
-            rotated_img = cv2.warpAffine(padded_img, M, (padded_img.shape[1], padded_img.shape[0]), flags=cv2.INTER_CUBIC)
-            recorte = cv2.getRectSubPix(rotated_img, (int(w), int(h)), (cx_pad, cy_pad))
-            
-            if rot_out == 90: recorte = cv2.rotate(recorte, cv2.ROTATE_90_CLOCKWISE)
-            elif rot_out == 180: recorte = cv2.rotate(recorte, cv2.ROTATE_180)
-            elif rot_out == 270: recorte = cv2.rotate(recorte, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            recorte = DetectorFotos.extraer_recorte(self.img_cv, cx, cy, w, h, angle, rot_out)
                 
             ruta = f"{self.dir_destino}/{self.nombre_base}_foto{contador}.jpg"
             cv2.imwrite(ruta, recorte)
@@ -100,9 +92,14 @@ class EscanerApp(QMainWindow):
         self.recuadros = []
         self.directorio_guardado_predeterminado = None
         
-        self.contador_escaneos = 1 # Para nombres incrementales
+        self.contador_escaneos = 1 
         self.undo_stack = []
         self.redo_stack = []
+        
+        self.caja_division = None
+        self.estado_parpadeo = True
+        self.timer_parpadeo = QTimer(self)
+        self.timer_parpadeo.timeout.connect(self.actualizar_parpadeo_division)
         
         self.initUI()
         self.aplicar_estilos()
@@ -159,7 +156,7 @@ class EscanerApp(QMainWindow):
         
         self.lista_archivos = QListWidget()
         self.lista_archivos.itemClicked.connect(self.cargar_desde_lista)
-        self.lista_archivos.itemChanged.connect(self._on_item_renombrado) # F2 Renombrar
+        self.lista_archivos.itemChanged.connect(self._on_item_renombrado) 
         layout_izq.addWidget(self.lista_archivos)
 
         zona_central = QWidget()
@@ -179,9 +176,17 @@ class EscanerApp(QMainWindow):
         btn_manual.setObjectName("btn_herramienta")
         btn_manual.clicked.connect(self.agregar_recuadro_manual)
         
+        self.btn_dividir = QPushButton("✂️ Dividir")
+        self.btn_dividir.setObjectName("btn_herramienta")
+        self.btn_dividir.clicked.connect(self.activar_modo_dividir)
+        self.btn_dividir.setEnabled(False)
+        
         btn_eliminar = QPushButton("🗑️ Eliminar (Supr)")
         btn_eliminar.setObjectName("btn_herramienta")
         btn_eliminar.clicked.connect(self.eliminar_recuadro_seleccionado)
+        
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self).activated.connect(self.eliminar_recuadro_seleccionado)
+        QShortcut(QKeySequence(Qt.Key.Key_Backspace), self).activated.connect(self.eliminar_recuadro_seleccionado)
         
         btn_deshacer = QPushButton("↩️ Deshacer")
         btn_deshacer.setObjectName("btn_herramienta")
@@ -193,11 +198,13 @@ class EscanerApp(QMainWindow):
         
         layout_tb.addWidget(btn_detectar)
         layout_tb.addWidget(btn_manual)
+        layout_tb.addWidget(self.btn_dividir)
         layout_tb.addWidget(btn_eliminar)
         layout_tb.addWidget(btn_deshacer)
         layout_tb.addWidget(btn_rehacer)
         
         self.scene = QGraphicsScene()
+        self.scene.selectionChanged.connect(self.on_selection_changed)
         self.view = ZoomView(self.scene)
         self.lupa_widget = QLabel(self.view)
         self.lupa_widget.setFixedSize(160, 160)
@@ -242,7 +249,6 @@ class EscanerApp(QMainWindow):
         splitter.setSizes([240, 800, 360]) 
         self.setCentralWidget(splitter)
 
-    # --- ORDENAMIENTO DE LISTA ---
     def ordenar_lista(self, criterio):
         items = []
         for i in range(self.lista_archivos.count()):
@@ -251,8 +257,11 @@ class EscanerApp(QMainWindow):
             fecha = os.path.getmtime(ruta) if ruta and os.path.exists(ruta) else 0
             items.append({'nombre': item.text(), 'fecha': fecha, 'ruta': ruta})
 
-        if criterio == "nombre_asc": items.sort(key=lambda x: x['nombre'].lower())
-        elif criterio == "nombre_desc": items.sort(key=lambda x: x['nombre'].lower(), reverse=True)
+        def natural_sort_key(d):
+            return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', d['nombre'])]
+
+        if criterio == "nombre_asc": items.sort(key=natural_sort_key)
+        elif criterio == "nombre_desc": items.sort(key=natural_sort_key, reverse=True)
         elif criterio == "fecha_desc": items.sort(key=lambda x: x['fecha'], reverse=True)
         elif criterio == "fecha_asc": items.sort(key=lambda x: x['fecha'])
 
@@ -260,10 +269,9 @@ class EscanerApp(QMainWindow):
         for d in items:
             new_item = QListWidgetItem(d['nombre'])
             new_item.setData(Qt.ItemDataRole.UserRole, d['ruta'])
-            new_item.setFlags(new_item.flags() | Qt.ItemFlag.ItemIsEditable) # Permite F2
+            new_item.setFlags(new_item.flags() | Qt.ItemFlag.ItemIsEditable) 
             self.lista_archivos.addItem(new_item)
 
-    # --- RENOMBRAR (F2) ---
     def _on_item_renombrado(self, item):
         ruta_antigua = item.data(Qt.ItemDataRole.UserRole)
         if not ruta_antigua: return
@@ -281,7 +289,6 @@ class EscanerApp(QMainWindow):
                 QMessageBox.warning(self, "Error", f"No se pudo renombrar: {e}")
                 item.setText(ruta_antigua_path.name) 
 
-    # --- ESCANEO FÍSICO ---
     def abrir_ventana_escaner(self):
         self.overlay_carga.mostrar("Buscando escáneres...")
         QTimer.singleShot(100, self._procesar_ventana_escaner)
@@ -302,7 +309,6 @@ class EscanerApp(QMainWindow):
             self.thread_escaner.start()
             
     def _on_escaneo_terminado(self, img_cv, qimg):
-        # FIX DE CRASHEO 2: Guardamos en un temporal físico para que OpenCV pueda leerlo luego
         temp_dir = tempfile.gettempdir()
         nombre_archivo = f"Escaneo_{self.contador_escaneos:02d}.bmp"
         file_path = os.path.join(temp_dir, nombre_archivo)
@@ -310,7 +316,7 @@ class EscanerApp(QMainWindow):
         
         item = QListWidgetItem(nombre_archivo)
         item.setData(Qt.ItemDataRole.UserRole, file_path)
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable) # Permite F2
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
         
         self.lista_archivos.addItem(item)
         self.lista_archivos.setCurrentItem(item)
@@ -323,7 +329,6 @@ class EscanerApp(QMainWindow):
         if "Cancelado" not in mensaje:
             QMessageBox.critical(self, "Error", f"Falló el escaneo:\n{mensaje}")
 
-    # --- HISTORIAL DESHACER / REHACER ---
     def guardar_estado(self):
         estado = []
         for box in self.recuadros:
@@ -352,47 +357,60 @@ class EscanerApp(QMainWindow):
         for data in estado:
             box = CajaRecorteInteractiva(data['cx'], data['cy'], data['w'], data['h'], data['angle'], self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
             box.rotacion_salida = data['rot_out']
+            box.on_dividir_callback = self.ejecutar_division
             self.scene.addItem(box)
             self.recuadros.append(box)
         self.generar_vistas_previas()
 
-    # --- LUPA ---
     def actualizar_lupa(self, scene_pos, show):
         if not show or self.pixmap_cached is None or scene_pos is None:
             self.lupa_widget.hide()
             return
             
         x, y = int(scene_pos.x()), int(scene_pos.y())
-        rect_ext = QRect(x - 30, y - 30, 60, 60)
+        rect_ext = QRect(x - 50, y - 50, 100, 100) 
         patch = self.pixmap_cached.copy(rect_ext)
         if patch.isNull(): return
         
-        patch_zoomed = patch.scaled(180, 180, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
-        target = QPixmap(160, 160)
+        patch_zoomed = patch.scaled(200, 200, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        target = QPixmap(200, 200) 
         target.fill(Qt.GlobalColor.transparent)
         painter = QPainter(target)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         path = QPainterPath()
-        path.addEllipse(5, 5, 150, 150)
+        path.addEllipse(10, 10, 180, 180)
         painter.setClipPath(path)
-        painter.drawPixmap(-10, -10, patch_zoomed)
+        painter.drawPixmap(0, 0, patch_zoomed)
         
-        painter.setPen(QPen(QColor(0, 255, 0), 2))
-        painter.drawLine(80, 70, 80, 90)
-        painter.drawLine(70, 80, 90, 80)
+        painter.setPen(QPen(QColor(255, 0, 0), 2))
+        painter.drawLine(100, 90, 100, 110)
+        painter.drawLine(90, 100, 110, 100)
         
         painter.setClipping(False)
         painter.setPen(QPen(QColor("#00A2ED"), 4))
-        painter.drawEllipse(5, 5, 150, 150)
+        painter.drawEllipse(10, 10, 180, 180)
         painter.end()
         
+        self.lupa_widget.setFixedSize(200, 200)
         self.lupa_widget.setPixmap(target)
+        
         view_pos = self.view.mapFromScene(scene_pos)
-        self.lupa_widget.move(view_pos.x() + 30, view_pos.y() + 30)
+        lupa_size = 200
+        offset = 30
+        
+        pos_x = view_pos.x() + offset
+        pos_y = view_pos.y() + offset
+        
+        if pos_x + lupa_size > self.view.viewport().width():
+            pos_x = view_pos.x() - lupa_size - offset
+            
+        if pos_y + lupa_size > self.view.viewport().height():
+            pos_y = view_pos.y() - lupa_size - offset
+            
+        self.lupa_widget.move(pos_x, pos_y)
         self.lupa_widget.show()
 
-    # --- ARCHIVOS ---
     def seleccionar_carpeta_origen(self):
         directorio = QFileDialog.getExistingDirectory(self, "Selecciona Carpeta")
         if directorio:
@@ -431,20 +449,30 @@ class EscanerApp(QMainWindow):
         self.thread_cargar.start()
         
     def _on_imagen_cargada(self, img_cv, qimg):
-        # FIX DE CRASHEO 1: Vaciamos python primero y luego QScene
         self.limpiar_recuadros_sin_guardar()
         self.scene.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
         
         self.imagen_opencv_actual = img_cv
+        scale_prev = 800.0 / max(1, img_cv.shape[0], img_cv.shape[1])
+        if scale_prev < 1.0:
+            self.imagen_opencv_preview = cv2.resize(img_cv, (0,0), fx=scale_prev, fy=scale_prev, interpolation=cv2.INTER_AREA)
+            self.scale_preview = scale_prev
+        else:
+            self.imagen_opencv_preview = img_cv
+            self.scale_preview = 1.0
+            
         self.pixmap_cached = QPixmap.fromImage(qimg)
+        
+        rect = self.pixmap_cached.rect()
+        margin = max(rect.width(), rect.height()) * 0.15 
+        
         self.scene.addPixmap(self.pixmap_cached)
-        self.scene.setSceneRect(QRectF(self.pixmap_cached.rect()))
+        self.scene.setSceneRect(QRectF(-margin, -margin, rect.width() + margin*2, rect.height() + margin*2))
         self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
         self.overlay_carga.ocultar()
 
-    # --- RECUADROS ---
     def ejecutar_deteccion(self):
         if not self.ruta_imagen_actual: return
         self.guardar_estado()
@@ -456,10 +484,20 @@ class EscanerApp(QMainWindow):
 
     def _on_deteccion_terminada(self, rects, img_cv):
         self.imagen_opencv_actual = img_cv
+        scale_prev = 800.0 / max(1, img_cv.shape[0], img_cv.shape[1])
+        if scale_prev < 1.0:
+            self.imagen_opencv_preview = cv2.resize(img_cv, (0,0), fx=scale_prev, fy=scale_prev, interpolation=cv2.INTER_AREA)
+            self.scale_preview = scale_prev
+        else:
+            self.imagen_opencv_preview = img_cv
+            self.scale_preview = 1.0
+            
         self.limpiar_recuadros_sin_guardar()
         for r in rects:
             box = CajaRecorteInteractiva(r['cx'], r['cy'], r['w'], r['h'], r['angle'], self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
+            box.on_dividir_callback = self.ejecutar_division
             self.scene.addItem(box)
+            box.fit_to_image_bounds()
             self.recuadros.append(box)
         self.generar_vistas_previas()
         self.overlay_carga.ocultar()
@@ -471,7 +509,9 @@ class EscanerApp(QMainWindow):
         cx, cy = img_w / 2, img_h / 2
         w, h = min(500, img_w * 0.4), min(500, img_h * 0.4)
         box = CajaRecorteInteractiva(cx, cy, w, h, 0, self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
+        box.on_dividir_callback = self.ejecutar_division
         self.scene.addItem(box)
+        box.fit_to_image_bounds()
         self.scene.clearSelection()
         box.setSelected(True)
         self.recuadros.append(box)
@@ -500,18 +540,14 @@ class EscanerApp(QMainWindow):
         cx, cy = box.pos().x(), box.pos().y()
         w, h = box.rect().width(), box.rect().height()
         angle = box.rotation()
-        size = int(math.hypot(w, h)) + 4 
-        parche_pequeno = cv2.getRectSubPix(self.imagen_opencv_actual, (size, size), (cx, cy))
-        centro_parche = (size / 2, size / 2)
-        M = cv2.getRotationMatrix2D(centro_parche, angle, 1.0)
-        parche_rotado = cv2.warpAffine(parche_pequeno, M, (size, size), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=[0,0,0])
-        recorte = cv2.getRectSubPix(parche_rotado, (int(w), int(h)), centro_parche)
-        
-        if box.rotacion_salida == 90: recorte = cv2.rotate(recorte, cv2.ROTATE_90_CLOCKWISE)
-        elif box.rotacion_salida == 180: recorte = cv2.rotate(recorte, cv2.ROTATE_180)
-        elif box.rotacion_salida == 270: recorte = cv2.rotate(recorte, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
-        return recorte
+        return DetectorFotos.extraer_recorte(self.imagen_opencv_actual, cx, cy, w, h, angle, box.rotacion_salida)
+
+    def extraer_recorte_cv2_preview(self, box):
+        cx, cy = box.pos().x() * getattr(self, 'scale_preview', 1.0), box.pos().y() * getattr(self, 'scale_preview', 1.0)
+        w, h = max(1, box.rect().width() * getattr(self, 'scale_preview', 1.0)), max(1, box.rect().height() * getattr(self, 'scale_preview', 1.0))
+        angle = box.rotation()
+        img_prev = getattr(self, 'imagen_opencv_preview', self.imagen_opencv_actual)
+        return DetectorFotos.extraer_recorte(img_prev, cx, cy, w, h, angle, box.rotacion_salida)
 
     def generar_vistas_previas(self):
         if self.imagen_opencv_actual is None: return
@@ -521,7 +557,7 @@ class EscanerApp(QMainWindow):
             
         for idx, box in enumerate(self.recuadros):
             try:
-                recorte_cv = self.extraer_recorte_cv2(box)
+                recorte_cv = self.extraer_recorte_cv2_preview(box)
                 rgb_image = cv2.cvtColor(recorte_cv, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
                 qimg = QImage(rgb_image.data, w, h, ch * w, QImage.Format.Format_RGB888)
@@ -579,3 +615,86 @@ class EscanerApp(QMainWindow):
                     primer_item = self.lista_archivos.item(0)
                     self.lista_archivos.setCurrentItem(primer_item)
                     self.cargar_desde_lista(primer_item)
+
+    def on_selection_changed(self):
+        items = self.scene.selectedItems()
+        self.btn_dividir.setEnabled(len(items) == 1)
+        if getattr(self, 'caja_division', None):
+            if not items or items[0] != self.caja_division:
+                self.cancelar_modo_dividir()
+
+    def actualizar_parpadeo_division(self):
+        self.estado_parpadeo = not self.estado_parpadeo
+        if self.caja_division:
+            self.caja_division.update()
+
+    def activar_modo_dividir(self):
+        items = self.scene.selectedItems()
+        if not items: return
+        self.caja_division = items[0]
+        self.caja_division.modo_division = True
+        self.estado_parpadeo = True
+        self.timer_parpadeo.start(300)
+        self.caja_division.update()
+
+    def cancelar_modo_dividir(self):
+        if self.caja_division:
+            self.caja_division.modo_division = False
+            self.caja_division.division_hover = None
+            self.caja_division.update()
+        self.caja_division = None
+        self.timer_parpadeo.stop()
+
+    def ejecutar_division(self, box, direccion):
+        self.guardar_estado()
+        self.cancelar_modo_dividir()
+        
+        cx, cy = box.pos().x(), box.pos().y()
+        w, h = box.rect().width(), box.rect().height()
+        angle = box.rotation()
+        rot_out = box.rotacion_salida
+        
+        self.scene.removeItem(box)
+        if box in self.recuadros:
+            self.recuadros.remove(box)
+            
+        ang_rad = math.radians(angle)
+        
+        if direccion == 'H':
+            h1 = h / 2
+            h2 = h / 2
+            offset_y1 = -h / 4
+            offset_y2 = h / 4
+            
+            cx1 = cx - offset_y1 * math.sin(ang_rad)
+            cy1 = cy + offset_y1 * math.cos(ang_rad)
+            cx2 = cx - offset_y2 * math.sin(ang_rad)
+            cy2 = cy + offset_y2 * math.cos(ang_rad)
+            
+            b1 = CajaRecorteInteractiva(cx1, cy1, w, h1, angle, self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
+            b2 = CajaRecorteInteractiva(cx2, cy2, w, h2, angle, self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
+        else:
+            w1 = w / 2
+            w2 = w / 2
+            offset_x1 = -w / 4
+            offset_x2 = w / 4
+            
+            cx1 = cx + offset_x1 * math.cos(ang_rad)
+            cy1 = cy + offset_x1 * math.sin(ang_rad)
+            cx2 = cx + offset_x2 * math.cos(ang_rad)
+            cy2 = cy + offset_x2 * math.sin(ang_rad)
+            
+            b1 = CajaRecorteInteractiva(cx1, cy1, w1, h, angle, self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
+            b2 = CajaRecorteInteractiva(cx2, cy2, w2, h, angle, self.generar_vistas_previas, self.actualizar_lupa, self.guardar_estado)
+            
+        b1.rotacion_salida = rot_out
+        b1.on_dividir_callback = self.ejecutar_division
+        b2.rotacion_salida = rot_out
+        b2.on_dividir_callback = self.ejecutar_division
+        
+        self.scene.addItem(b1)
+        self.scene.addItem(b2)
+        self.recuadros.append(b1)
+        self.recuadros.append(b2)
+        
+        self.generar_vistas_previas()

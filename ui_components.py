@@ -14,7 +14,6 @@ def get_rotate_cursor():
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Sombra negra para que resalte
         pen_bg = QPen(QColor(0,0,0,180), 5)
         pen_bg.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen_bg)
@@ -25,7 +24,6 @@ def get_rotate_cursor():
         painter.drawLine(12, 0, 20, -8)
         painter.resetTransform()
         
-        # Flecha principal blanca
         pen_fg = QPen(Qt.GlobalColor.white, 2)
         pen_fg.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen_fg)
@@ -128,16 +126,12 @@ class CajaRecorteInteractiva(QGraphicsRectItem):
         scale = self.get_scale_factor()
         if scale == 0: scale = 1.0
         
-        # El radio físico para los clics en PyQt es exactamente igual al dibujo visual
-        radio_visual = 8.0 / scale 
-        
-        # Permitir seleccionar el centro de la caja para moverla
+        radio_visual = 5.0 / scale 
         path.addRect(self.rect())
         
-        # Agregar exclusivamente los círculos exactos a la zona de clic
         nodos = self.obtener_posiciones_nodos()
         for clave, pos in nodos.items():
-            r_hit = radio_visual * 1.5 if clave == 'ROT' else radio_visual
+            r_hit = radio_visual + (6.0 / scale)
             path.addEllipse(pos, r_hit, r_hit)
             
         return path
@@ -147,8 +141,7 @@ class CajaRecorteInteractiva(QGraphicsRectItem):
         scale = self.get_scale_factor()
         if scale == 0: scale = 1.0
         
-        # TAMAÑOS VISUALES
-        radio_visual = 8.0 / scale 
+        radio_visual = 5.0 / scale 
         grosor_linea = 1.5 / scale 
         
         if self.isSelected():
@@ -167,20 +160,33 @@ class CajaRecorteInteractiva(QGraphicsRectItem):
             
             for clave, pos in nodos.items():
                 if clave != 'ROT':
-                    # Dibuja el círculo exactamente del mismo radio que se usará para el clic
                     painter.drawEllipse(pos, radio_visual, radio_visual)
             
-            painter.drawEllipse(rot_pos, radio_visual * 1.5, radio_visual * 1.5) 
+            painter.drawEllipse(rot_pos, radio_visual, radio_visual) 
             
             painter.setPen(QPen(QColor("#404040"), grosor_linea * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.save()
             painter.translate(rot_pos)
-            ar = radio_visual * 2.0
+            ar = radio_visual * 2.5
             painter.drawArc(QRectF(-ar, -ar, ar*2, ar*2), 45 * 16, 270 * 16)
             painter.rotate(45)
-            painter.drawLine(QPointF(ar, 0), QPointF(ar - radio_visual*0.6, -radio_visual*0.6))
-            painter.drawLine(QPointF(ar, 0), QPointF(ar + radio_visual*0.6, -radio_visual*0.6))
+            painter.drawLine(QPointF(ar, 0), QPointF(ar - radio_visual*0.8, -radio_visual*0.8))
+            painter.drawLine(QPointF(ar, 0), QPointF(ar + radio_visual*0.8, -radio_visual*0.8))
             painter.restore()
+            
+            if getattr(self, 'modo_division', False):
+                estado_parpadeo = True
+                if hasattr(self.scene().views()[0].window(), 'estado_parpadeo'):
+                    estado_parpadeo = self.scene().views()[0].window().estado_parpadeo
+                if estado_parpadeo:
+                    painter.setPen(QPen(QColor(255, 0, 0), grosor_linea * 2, Qt.PenStyle.DashLine))
+                    if getattr(self, 'division_hover', None) == 'H':
+                        painter.drawLine(QPointF(r.left(), 0), QPointF(r.right(), 0))
+                    elif getattr(self, 'division_hover', None) == 'V':
+                        painter.drawLine(QPointF(0, r.top()), QPointF(0, r.bottom()))
+                    else:
+                        painter.drawLine(QPointF(r.left(), 0), QPointF(r.right(), 0))
+                        painter.drawLine(QPointF(0, r.top()), QPointF(0, r.bottom()))
             
         else:
             painter.setBrush(QBrush(QColor(0, 162, 237, 10))) 
@@ -188,44 +194,117 @@ class CajaRecorteInteractiva(QGraphicsRectItem):
             painter.drawRect(r)
 
     def obtener_accion_click(self, pos):
-        """
-        PRECISIÓN MILIMÉTRICA: 
-        Comprueba si la distancia del ratón al centro del punto es menor 
-        o igual al radio dibujado. Cero tolerancia extra.
-        """
         scale = self.get_scale_factor()
         if scale == 0: scale = 1.0
         
-        radio_visual = 8.0 / scale 
+        radio_visual = 5.0 / scale 
         nodos = self.obtener_posiciones_nodos()
         
         for clave, pos_nodo in nodos.items():
             if clave == 'ROT' and not self.isSelected(): continue
             
             dist = math.hypot(pos.x() - pos_nodo.x(), pos.y() - pos_nodo.y())
-            radio_actual = radio_visual * 1.5 if clave == 'ROT' else radio_visual
+            radio_actual = radio_visual + (6.0 / scale)
             
-            # Si el clic está físicamente tocando el blanco del círculo pintado:
             if dist <= radio_actual:
                 return clave
-                
         return None
 
     def hoverMoveEvent(self, event):
-        nodo = self.obtener_accion_click(event.pos())
-        if nodo in ('TL', 'BR'): self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif nodo in ('TR', 'BL'): self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        elif nodo in ('T', 'B'): self.setCursor(Qt.CursorShape.SizeVerCursor)
-        elif nodo in ('L', 'R'): self.setCursor(Qt.CursorShape.SizeHorCursor)
-        elif nodo == 'ROT': self.setCursor(get_rotate_cursor()) 
-        elif self.rect().contains(event.pos()): self.setCursor(Qt.CursorShape.SizeAllCursor)
-        else: self.setCursor(Qt.CursorShape.ArrowCursor)
+        if getattr(self, 'modo_division', False):
+            pos = event.pos()
+            dist_h = abs(pos.y())
+            dist_v = abs(pos.x())
+            self.division_hover = 'H' if dist_h < dist_v else 'V'
+            self.update()
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
+
+        if self.isSelected():
+            nodo = self.obtener_accion_click(event.pos())
+            if nodo in ('TL', 'BR'): self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif nodo in ('TR', 'BL'): self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif nodo in ('T', 'B'): self.setCursor(Qt.CursorShape.SizeVerCursor)
+            elif nodo in ('L', 'R'): self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif nodo == 'ROT': self.setCursor(get_rotate_cursor()) 
+            elif self.rect().contains(event.pos()): self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else: self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            if self.rect().contains(event.pos()): self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else: self.setCursor(Qt.CursorShape.ArrowCursor)
         super().hoverMoveEvent(event)
 
+    def get_image_rect(self):
+        from PyQt6.QtWidgets import QGraphicsPixmapItem
+        for item in self.scene().items():
+            if isinstance(item, QGraphicsPixmapItem):
+                return item.boundingRect()
+        return self.scene().sceneRect()
+
+    def clamp_to_image_bounds(self):
+        """Asegura que el cuadro de recorte no salga de los límites de la imagen."""
+        if not self.scene():
+            return
+        img_rect = self.get_image_rect()
+        
+        r = self.rect()
+        w, h = r.width(), r.height()
+        angle = self.rotation()
+        cx, cy = self.pos().x(), self.pos().y()
+        
+        # Para cuadros rotados, calcular la bounding box en coordenadas de escena
+        ang_rad = math.radians(angle)
+        cos_a = abs(math.cos(ang_rad))
+        sin_a = abs(math.sin(ang_rad))
+        
+        # Dimensiones de la bounding box alineada con ejes después de la rotación
+        bb_w = w * cos_a + h * sin_a
+        bb_h = w * sin_a + h * cos_a
+        
+        # Clampar el tamaño si es más grande que la imagen
+        max_w = img_rect.width()
+        max_h = img_rect.height()
+        
+        # Clampar la posición del centro para que la bounding box no exceda la imagen
+        half_bb_w = bb_w / 2.0
+        half_bb_h = bb_h / 2.0
+        
+        min_cx = img_rect.left() + half_bb_w
+        max_cx = img_rect.right() - half_bb_w
+        min_cy = img_rect.top() + half_bb_h
+        max_cy = img_rect.bottom() - half_bb_h
+        
+        # Si la bounding box es más grande que la imagen, centrar
+        if min_cx > max_cx:
+            cx = img_rect.center().x()
+        else:
+            cx = max(min_cx, min(max_cx, cx))
+            
+        if min_cy > max_cy:
+            cy = img_rect.center().y()
+        else:
+            cy = max(min_cy, min(max_cy, cy))
+        
+        self.setPos(cx, cy)
+
     def mousePressEvent(self, event):
+        if getattr(self, 'modo_division', False):
+            direccion = getattr(self, 'division_hover', 'H')
+            if hasattr(self, 'on_dividir_callback'):
+                self.on_dividir_callback(self, direccion)
+            event.accept()
+            return
+        
+        # Si no está seleccionado, solo seleccionar (no mover ni redimensionar)
+        if not self.isSelected():
+            self.scene().clearSelection()
+            self.setSelected(True)
+            self.on_press_callback()
+            event.accept()
+            return
+            
         self.accion_actual = self.obtener_accion_click(event.pos())
         if self.accion_actual:
-            self.setSelected(True) 
             self.on_press_callback() 
             self._inicio_escena_pos = self.scenePos()
             self._inicio_rect = self.rect()
@@ -238,31 +317,23 @@ class CajaRecorteInteractiva(QGraphicsRectItem):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        scene_rect = self.scene().sceneRect()
-        
+        if getattr(self, 'modo_division', False):
+            return
+            
         if self.accion_actual == 'ROT':
             old_angle = self.rotation()
             centro_escena = self.mapToScene(QPointF(0, 0))
             vector = event.scenePos() - centro_escena
             angulo = math.degrees(math.atan2(vector.y(), vector.x())) + 90
             self.setRotation(angulo)
-            
-            poly = self.mapToScene(self.rect())
-            if any(not scene_rect.contains(p) for p in poly):
-                self.setRotation(old_angle)
                 
             self.on_lupa_callback(event.scenePos(), True)
             
         elif self.accion_actual:
-            delta_real = event.scenePos() - event.lastScenePos()
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                self._logical_mouse_pos += delta_real * 0.25 
+                self._logical_mouse_pos += (event.scenePos() - event.lastScenePos()) * 0.25 
             else:
-                self._logical_mouse_pos += delta_real
-
-            lx = max(scene_rect.left(), min(self._logical_mouse_pos.x(), scene_rect.right()))
-            ly = max(scene_rect.top(), min(self._logical_mouse_pos.y(), scene_rect.bottom()))
-            self._logical_mouse_pos = QPointF(lx, ly)
+                self._logical_mouse_pos = event.scenePos()
 
             old_rect = self.rect()
             old_pos = self.pos()
@@ -300,32 +371,59 @@ class CajaRecorteInteractiva(QGraphicsRectItem):
             self.setRect(-nuevo_w/2, -nuevo_h/2, nuevo_w, nuevo_h)
             self.setPos(self._inicio_escena_pos.x() + offset_x, self._inicio_escena_pos.y() + offset_y)
             
-            poly = self.mapToScene(self.rect())
-            if any(not scene_rect.contains(p) for p in poly):
-                self.setRect(old_rect)
-                self.setPos(old_pos)
-
+            # Clampar durante el redimensionamiento para no salir de la imagen
+            if self.scene():
+                self.clamp_to_image_bounds()
+            
             self.on_lupa_callback(event.scenePos(), True) 
         else:
-            delta_real = event.scenePos() - event.lastScenePos()
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                delta_real *= 0.25
-                
-            old_pos = self.pos()
-            self.setPos(self.pos() + delta_real)
-            
-            poly = self.mapToScene(self.rect())
-            if any(not scene_rect.contains(p) for p in poly):
-                self.setPos(old_pos)
-
+            super().mouseMoveEvent(event)
+            # Clampar durante el arrastre de movimiento
+            if self.scene():
+                self.clamp_to_image_bounds()
             self.on_lupa_callback(event.scenePos(), True)
 
     def mouseReleaseEvent(self, event):
+        was_action = self.accion_actual is not None
         self.accion_actual = None
         super().mouseReleaseEvent(event)
+        # Clampar al soltar (cubre movimiento y redimensionamiento)
+        if self.scene():
+            self.clamp_to_image_bounds()
         self.on_lupa_callback(None, False)
         self.on_release_callback()
 
+    def fit_to_image_bounds(self):
+        """Ajusta el tamaño y posición del cuadro para que quepa dentro de la imagen."""
+        if not self.scene():
+            return
+        img_rect = self.get_image_rect()
+        
+        r = self.rect()
+        w, h = r.width(), r.height()
+        angle = self.rotation()
+        
+        ang_rad = math.radians(angle)
+        cos_a = abs(math.cos(ang_rad))
+        sin_a = abs(math.sin(ang_rad))
+        
+        # Calcular la bounding box rotada
+        bb_w = w * cos_a + h * sin_a
+        bb_h = w * sin_a + h * cos_a
+        
+        # Si la bounding box excede la imagen, reducir proporcionalmente
+        max_w = img_rect.width()
+        max_h = img_rect.height()
+        
+        if bb_w > max_w or bb_h > max_h:
+            scale_w = max_w / bb_w if bb_w > max_w else 1.0
+            scale_h = max_h / bb_h if bb_h > max_h else 1.0
+            scale = min(scale_w, scale_h)
+            w *= scale
+            h *= scale
+            self.setRect(-w/2, -h/2, w, h)
+        
+        self.clamp_to_image_bounds()
 
 class VistaPreviaWidget(QWidget):
     def __init__(self, pixmap, index, caja_ref, callback_press):
@@ -382,7 +480,6 @@ class VistaPreviaWidget(QWidget):
         transform = QTransform().rotate(90)
         self.pixmap_actual = self.pixmap_actual.transformed(transform, Qt.TransformationMode.SmoothTransformation)
         self._actualizar_imagen()
-
 
 class PantallaCarga(QWidget):
     def __init__(self, parent):
@@ -559,13 +656,13 @@ class DialogoEscaner(QDialog):
             for esc in self.escaneres:
                 self.combo_escaner.addItem(esc['nombre'], esc['id'])
                 
-        btn_actualizar = QPushButton("Actualizar")
-        btn_actualizar.setObjectName("btn_secundario")
-        btn_actualizar.clicked.connect(self.solicitar_actualizacion)
+        self.btn_actualizar = QPushButton("Actualizar")
+        self.btn_actualizar.setObjectName("btn_secundario")
+        self.btn_actualizar.clicked.connect(self.solicitar_actualizacion)
         
         row_escaner.addWidget(lbl_esc)
         row_escaner.addWidget(self.combo_escaner)
-        row_escaner.addWidget(btn_actualizar)
+        row_escaner.addWidget(self.btn_actualizar)
         
         row_res = QHBoxLayout()
         lbl_res = QLabel("Seleccione Resolución:")
@@ -596,22 +693,41 @@ class DialogoEscaner(QDialog):
         btn_cancelar = QPushButton("Cancelar")
         btn_cancelar.clicked.connect(self.reject)
         
-        btn_ok = QPushButton("Escanear")
-        btn_ok.setObjectName("btn_escanear_azul") 
-        btn_ok.clicked.connect(self.accept)
+        self.btn_ok = QPushButton("Escanear")
+        self.btn_ok.setObjectName("btn_primario")
+        self.btn_ok.clicked.connect(self.accept)
         
         if not self.escaneres:
-            btn_ok.setEnabled(False)
-            btn_ok.setStyleSheet("background-color: #555555;")
+            self.btn_ok.setEnabled(False)
+            self.btn_ok.setStyleSheet("background-color: #555555;")
             
         botones_layout.addWidget(btn_cancelar)
-        botones_layout.addWidget(btn_ok)
+        botones_layout.addWidget(self.btn_ok)
         layout.addLayout(botones_layout)
 
     def solicitar_actualizacion(self):
-        self.parent().overlay_carga.mostrar("Buscando escáneres...")
-        QTimer.singleShot(500, self.parent()._procesar_ventana_escaner)
-        self.accept()
+        self.btn_actualizar.setText("Buscando...")
+        self.btn_actualizar.setEnabled(False)
+        QTimer.singleShot(100, self._ejecutar_actualizacion)
+
+    def _ejecutar_actualizacion(self):
+        from motor_escaner import MotorEscaner
+        self.escaneres = MotorEscaner.listar_escaneres()
+        self.combo_escaner.clear()
+        if not self.escaneres:
+            self.combo_escaner.addItem("No se encontraron escáneres encendidos")
+            self.combo_escaner.setEnabled(False)
+            self.btn_ok.setEnabled(False)
+            self.btn_ok.setStyleSheet("background-color: #555555;")
+        else:
+            self.combo_escaner.setEnabled(True)
+            for esc in self.escaneres:
+                self.combo_escaner.addItem(esc['nombre'], esc['id'])
+            self.btn_ok.setEnabled(True)
+            self.btn_ok.setStyleSheet("")
+            
+        self.btn_actualizar.setText("Actualizar")
+        self.btn_actualizar.setEnabled(True)
 
     def obtener_configuracion(self):
         dpi_str = self.combo_res.currentText().split(" ")[0]
